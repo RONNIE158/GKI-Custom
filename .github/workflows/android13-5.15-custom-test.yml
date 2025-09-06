@@ -14,7 +14,7 @@ on:
         type: string
         description: >
           OS Version of boot image
-          for example: 14.0.0
+          for example: 13.5.15
       version_name:
         required: true
         type: string
