@@ -9,19 +9,19 @@ on:
         description: >
           Patch level of common kernel manifest,
           for example: 2024-06
-      os_version:
+      os_version: 2024-06
         required: true
         type: string
         description: >
           OS Version of boot image
           for example: 13.5.15
-      version_name:
+      version_name: 13.5.15
         required: true
         type: string
         description: >
           With SUBLEVEL of kernel,
           for example: android13-5.15
-      custom:
+      custom: android13-5.15
         required: true
         type: boolean
         description: >
