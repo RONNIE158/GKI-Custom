@@ -1,120 +1,93 @@
-name: Android14-5.15-Custom
+name: Build Pixel 7/7 Pro GKI Official Kernel
 
-on: 
+on:
   workflow_dispatch:
-    inputs:
-      os_patch_level:
-        required: true
-        type: string
-        description: >
-          Patch level of common kernel manifest,
-          for example: 2024-04
-      os_version:
-        required: true
-        type: string
-        description: >
-          OS Version of boot image
-          for example: 12.0.0
-      version_name:
-        required: true
-        type: string
-        description: >
-          With SUBLEVEL of kernel,
-          for example: android14-5.15.123
-      custom:
-        required: true
-        type: boolean
-        description: >
-          Enable LXC, Docker
-      kernelsu:
-        required: true
-        type: boolean
-        description: >
-          Enable KernelSU
+
+env:
+  DEVICE: pantah
+  KERNEL_DIR: kernel
+  CLANG_VERSION: r416183b
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout Kernel Source
+      run: |
+        git clone --depth=1 -b android-gs-pantah-6.1-android16 https://android.googlesource.com/kernel/common ${{ env.KERNEL_DIR }}
+
+    - name: Set up ccache
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ${{ runner.os }}-ccache-${{ hashFiles('**/arch/arm64/configs/gki_defconfig') }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-
 
     - name: Install Dependencies
       run: |
-        sudo apt install repo wget -y
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential flex gcc clang lld \
+          libssl-dev libncurses5-dev libncursesw5-dev \
+          python3 python3-pip rsync ccache zip \
+          gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+          binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+          git curl wget unzip
 
-    - name: Install latest repo tool
+    - name: Set up Clang
       run: |
-        curl https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
-        chmod a+x /usr/local/bin/repo
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-${{ env.CLANG_VERSION }} clang
+        echo "${{ github.workspace }}/clang/bin" >> $GITHUB_PATH
 
-    - name: Verify repo version
-      run: repo --version
-
-    - name: Sync the kernel source code
+    - name: Patch gki_defconfig for LXC/Docker
       run: |
-        cd $GITHUB_WORKSPACE
-        mkdir android-kernel
-        cd android-kernel
-        repo init --depth 1 -u https://android.googlesource.com/kernel/manifest -b common-android14-5.15-${{ inputs.os_patch_level }}
-        repo sync
+        cd ${{ env.KERNEL_DIR }}
+        cp arch/arm64/configs/gki_defconfig out/.config
+        # Aktifkan CGroup v2 dan LXC/Docker support
+        scripts/config --file out/.config -e CONFIG_CGROUPS
+        scripts/config --file out/.config -e CONFIG_CGROUP_V2
+        scripts/config --file out/.config -e CONFIG_MEMCG
+        scripts/config --file out/.config -e CONFIG_CGROUP_CPUACCT
+        scripts/config --file out/.config -e CONFIG_CGROUP_DEVICE
+        scripts/config --file out/.config -e CONFIG_CGROUP_FREEZER
+        scripts/config --file out/.config -e CONFIG_CGROUP_PIDS
+        scripts/config --file out/.config -e CONFIG_CPUSETS
+        scripts/config --file out/.config -e CONFIG_NAMESPACES
+        scripts/config --file out/.config -e CONFIG_PID_NS
+        scripts/config --file out/.config -e CONFIG_NET_NS
+        scripts/config --file out/.config -e CONFIG_KEYS
+        yes "" | make O=out ARCH=arm64 oldconfig
 
-    - name: Apply patches and configuration files
-      if: ${{ inputs.custom == true }}
+    - name: Build GKI Kernel
       run: |
-        cd $GITHUB_WORKSPACE
-        git clone https://github.com/rvalyi/GKI-Custom.git gki-patch
-        cp ./gki-patch/config/gki_defconfig-android14-5.15 ./android-kernel/common/arch/arm64/configs/gki_defconfig
-        cd ./android-kernel/common
-        git apply $GITHUB_WORKSPACE/gki-patch/patchs/*.patch
+        cd ${{ env.KERNEL_DIR }}
+        export PATH="${{ github.workspace }}/clang/bin:$PATH"
+        export CC=clang
+        export LD=ld.lld
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        make -j$(nproc) O=out ARCH=arm64 \
+          CC=clang \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          LD=ld.lld \
+          CCACHE=ccache
 
-    - name: KernelSU
-      if: ${{ inputs.kernelsu == true }}
+    - name: Build Kernel Modules
       run: |
-          cd $GITHUB_WORKSPACE/android-kernel
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+        cd ${{ env.KERNEL_DIR }}
+        export PATH="${{ github.workspace }}/clang/bin:$PATH"
+        export CC=clang
+        export LD=ld.lld
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        make -j$(nproc) O=out ARCH=arm64 modules
 
-    - name: Build Kernel
-      run: |
-        cd $GITHUB_WORKSPACE/android-kernel
-        echo "ls"
-        ls
-        tools/bazel build //common:kernel_aarch64_dist
-
-    - name: Prepare artifacts
-      id: prepareArtifacts
-      run: |
-        cd $GITHUB_WORKSPACE
-        OUTDIR=android-kernel/out/android14-5.15/dist
-        mkdir output
-        cp $OUTDIR/Image ./output/
-        cp $OUTDIR/Image.lz4 ./output/
-        cp $OUTDIR/Image ./
-        gzip -n -k -f -9 Image >Image.gz
-        git clone https://github.com/Kernel-SU/AnyKernel3
-        rm -rf ./AnyKernel3/.git
-        cp $OUTDIR/Image ./AnyKernel3/
-        wget https://dl.google.com/android/gki/gki-certified-boot-android14-5.15-${{ inputs.os_patch_level }}_r1.zip -O ./gki-kernel.zip
-        unzip -q ./gki-kernel.zip
-        rm ./gki-kernel.zip
-        cd $GITHUB_WORKSPACE/android-kernel
-        echo "Unpack boot"
-        ./tools/mkbootimg/unpack_bootimg.py --boot_img $GITHUB_WORKSPACE/boot*.img
-        echo "Build boot.img"
-        ./tools/mkbootimg/mkbootimg.py --header_version 4 --kernel out/android14-5.15/dist/Image --ramdisk out/ramdisk --os_version ${{ inputs.os_version }} --os_patch_level ${{ inputs.os_patch_level }} -o $GITHUB_WORKSPACE/output/${{ inputs.version_name }}_${{ inputs.os_patch_level }}-boot.img
-        echo "Build boot-lz4.img"
-        ./tools/mkbootimg/mkbootimg.py --header_version 4 --kernel out/android14-5.15/dist/Image.lz4 --ramdisk out/ramdisk --os_version ${{ inputs.os_version }} --os_patch_level ${{ inputs.os_patch_level }} -o $GITHUB_WORKSPACE/output/${{ inputs.version_name }}_${{ inputs.os_patch_level }}-boot-lz4.img
-        echo "Build boot-gz.img"
-        ./tools/mkbootimg/mkbootimg.py --header_version 4 --kernel $GITHUB_WORKSPACE/Image.gz --ramdisk out/ramdisk --os_version ${{ inputs.os_version }} --os_patch_level ${{ inputs.os_patch_level }} -o $GITHUB_WORKSPACE/output/${{ inputs.version_name }}_${{ inputs.os_patch_level }}-boot-gz.img
-
-    - name: Upload Image and Image.gz and boot.img
+    - name: Upload Kernel Image and Modules
       uses: actions/upload-artifact@v4
       with:
-        name: Image-${{ inputs.version_name }}_${{ inputs.os_patch_level }}
-        path: ./output/*
-
-    - name: Upload AnyKernel3
-      uses: actions/upload-artifact@v4
-      with:
-        name: AnyKernel3-${{ inputs.version_name }}_${{ inputs.os_patch_level }}
-        path: ./AnyKernel3/*
+        name: kernel-${{ env.DEVICE }}
+        path: |
+          ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb
+          ${{ env.KERNEL_DIR }}/out/lib/modules/
